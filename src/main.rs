@@ -16,8 +16,12 @@ struct StarSystem {
     pub is_neutron: bool,
 }
 
+fn square(a: f64) -> f64 {
+    a * a
+}
+
 fn distance_v(a: &V3, b: &V3) -> f64 {
-    ((a.0 - b.0).powf(2.0) + (a.1 - b.1).powf(2.0) + (a.2 - b.2).powf(2.0)).sqrt()
+    (square(a.0 - b.0) + square(a.1 - b.1) + square(a.2 - b.2)).sqrt()
 }
 
 fn distance(a: &StarSystem, b: &StarSystem) -> f64 {
