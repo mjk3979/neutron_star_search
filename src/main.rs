@@ -309,7 +309,6 @@ fn neutron_a_star(systems: &Vec<StarSystem>, start_idx: usize, goal_idx: usize, 
         let parent_s = &systems[parent_idx];
         let current = &systems[current_idx];
         let from_path_len = if parent_s.is_neutron && distance(parent_s, current) <= jump_distance * 4.0 {
-            println!("    Got one!");
             1
         } else if distance(parent_s, current) <= jump_distance {
             1
