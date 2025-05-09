@@ -307,17 +307,20 @@ fn neutron_a_star(systems: &Vec<StarSystem>, start_idx: usize, goal_idx: usize, 
     h_score.insert(goal_idx, no_neutron_h_score);
     parent.insert(goal_idx, start_idx);
 
-    to_visit.push(Reverse((no_neutron_h_score, goal_idx)));
+    to_visit.push(Reverse((no_neutron_h_score, goal_idx, 0)));
     for (n_idx_idx, &n_idx) in neutron_systems.iter().enumerate() {
         let h = h_fn(start_idx, n_idx_idx);
         if h < no_neutron_h_score {
             *h_score.entry(n_idx).or_insert(h) = h;
-            to_visit.push(Reverse((h, n_idx)));
+            to_visit.push(Reverse((h, n_idx, n_idx_idx)));
             *parent.entry(n_idx).or_insert(start_idx) = start_idx;
         }
     }
 
-    while let Some(Reverse((current_h_score, current_idx))) = to_visit.pop() {
+    let mut visited: Vec<bool> = vec![false; neutron_systems.len()];
+    let mut num_processed: usize = 0;
+
+    while let Some(Reverse((current_h_score, current_idx, current_idx_idx))) = to_visit.pop() {
         if current_idx == goal_idx {
             break;
         }
@@ -344,8 +347,8 @@ fn neutron_a_star(systems: &Vec<StarSystem>, start_idx: usize, goal_idx: usize, 
         let from_path_distance = distance(parent_s, current);
         let parent_g_score = g_score[&parent_idx];
         let cur_g_score = HScore{jumps: parent_g_score.jumps + from_path_len, distance:parent_g_score.distance + from_path_distance};
-        println!("[N] Queue length: {}", to_visit.len());
-        println!("[N] Processing {} {:?}\n {:?} {:?}", systems[current_idx].name, systems[current_idx].coords, cur_g_score, current_h_score);
+        //println!("[N] Queue length: {}", to_visit.len());
+        //println!("[N] Processing {} {:?}\n {:?} {:?}", systems[current_idx].name, systems[current_idx].coords, cur_g_score, current_h_score);
         *g_score.entry(current_idx).or_insert(cur_g_score) = cur_g_score;
         let to_goal_distance = distance(current, goal);
         let to_goal_jumps = f32::from((to_goal_distance / jump_distance).ceil()) as i64;
@@ -355,13 +358,22 @@ fn neutron_a_star(systems: &Vec<StarSystem>, start_idx: usize, goal_idx: usize, 
         };
         if to_goal_h_score < h_score[&goal_idx] {
             *h_score.get_mut(&goal_idx).unwrap() = to_goal_h_score;
-            to_visit.push(Reverse((to_goal_h_score, goal_idx)));
+            to_visit.push(Reverse((to_goal_h_score, goal_idx, 0)));
             *parent.get_mut(&goal_idx).unwrap() = current_idx;
         }
 
         let d_from_sol_cutoff = if to_goal_distance < total_distance {to_goal_distance} else {total_distance};
+        
+        visited[current_idx_idx] = true;
+        num_processed += 1;
+        if num_processed % 100_000 == 0 {
+            println!("Total processed {} ({}%)", num_processed, (num_processed as f64 * 100.0) / (neutron_systems.len() as f64));
+        }
 
         for (n_idx_idx, &neighbor_idx) in neutron_systems.iter().enumerate() {
+            if visited[n_idx_idx] {
+                continue;
+            }
             let neighbor = &systems[neighbor_idx];
             let d_from_sol_diff = (neighbor.distance_from_sol - current.distance_from_sol).abs();
             if d_from_sol_diff >= d_from_sol_cutoff - neutron_distance_to_goal[n_idx_idx] {
@@ -375,7 +387,7 @@ fn neutron_a_star(systems: &Vec<StarSystem>, start_idx: usize, goal_idx: usize, 
             }
             if !h_score.contains_key(&neighbor_idx) || new_h_score < h_score[&neighbor_idx] {
                 *h_score.entry(neighbor_idx).or_insert(new_h_score) = new_h_score;
-                to_visit.push(Reverse((new_h_score, neighbor_idx)));
+                to_visit.push(Reverse((new_h_score, neighbor_idx, n_idx_idx)));
                 *parent.entry(neighbor_idx).or_insert(current_idx) = current_idx;
             }
         }
