@@ -4,6 +4,8 @@ use std::io::BufReader;
 use std::collections::{HashMap, BinaryHeap};
 use std::cmp::Reverse;
 use fast_fp::{FF32};
+use rayon::prelude::*;
+use std::sync::{Arc, Mutex};
 
 pub type Float = FF32;
 pub type V3 = (Float, Float, Float);
@@ -17,10 +19,10 @@ pub struct StarSystem {
     pub is_neutron: bool,
 }
 
-#[derive(Debug, bincode::Encode, bincode::Decode)]
+#[derive(Debug, Clone, bincode::Encode, bincode::Decode)]
 pub struct NeutronStarSystem {
-    pub idx: usize,
-    pub neighbors: Vec<usize>,
+    pub idx: u32,
+    pub neighbors: Box<[u32]>,
 }
 
 fn square(a: Float) -> Float {
@@ -127,6 +129,14 @@ pub fn read_star_systems_bincode(filename: &str, filter: fn(&StarSystem) -> bool
     let mut gz = flate2::read::GzDecoder::new(f);
     let records: Vec<StarSystemRecord> = bincode::decode_from_std_read(&mut gz, bincode::config::standard()).unwrap();
     records.into_iter().map(|r| r.into()).filter(filter).collect()
+}
+
+pub fn read_neutron_stars_bincode(filename: &str) -> Box<[NeutronStarSystem]> {
+    let f = File::open(filename).unwrap();
+    //let mut gz = flate2::read::GzDecoder::new(f);
+    let mut buf = BufReader::new(f);
+    let records: Vec<NeutronStarSystem> = bincode::decode_from_std_read(&mut buf, bincode::config::standard()).unwrap();
+    records.into_iter().collect()
 }
 
 fn neighbors(systems: &Vec<StarSystem>, system_idx: usize, mut jump_distance: Float) -> Vec<usize> {
@@ -269,24 +279,16 @@ pub fn a_star(systems: &Vec<StarSystem>, start_idx: usize, goal_idx: usize, jump
     None
 }
 
-pub fn neutron_a_star(systems: &Vec<StarSystem>, start_idx: usize, goal_idx: usize, jump_distance: Float) -> Option<Vec<usize>> {
+pub fn neutron_a_star(systems: &Vec<StarSystem>, neutron_systems: &[NeutronStarSystem], start_idx: usize, goal_idx: usize, jump_distance: Float) -> Option<Vec<usize>> {
     let start = &systems[start_idx];
     let goal = &systems[goal_idx];
 
     let total_distance = distance(start, goal);
 
-    let neutron_systems: Vec<usize> = systems.iter().enumerate().filter_map(|(i, s)| {
-        if s.is_neutron {
-            Some(i)
-        } else {
-            None
-        }
-    }).collect();
-
     println!("Neutron star count: {}", neutron_systems.len());
 
-    let neutron_distance_to_goal: Vec<Float> = neutron_systems.iter().map(|&n| {
-        let system = &systems[n];
+    let neutron_distance_to_goal: Vec<Float> = neutron_systems.iter().map(|n| {
+        let system = &systems[n.idx as usize];
         distance(system, goal) / 4.0
     }).collect();
 
@@ -297,7 +299,7 @@ pub fn neutron_a_star(systems: &Vec<StarSystem>, start_idx: usize, goal_idx: usi
     // }).collect();
 
     let h_fn = |from_idx: usize, system_n_idx: usize| -> HScore {
-        let system_idx = neutron_systems[system_n_idx];
+        let system_idx = neutron_systems[system_n_idx].idx as usize;
         let system = &systems[system_idx];
         let from = &systems[from_idx];
         let from_distance = distance(from, system);
@@ -318,15 +320,17 @@ pub fn neutron_a_star(systems: &Vec<StarSystem>, start_idx: usize, goal_idx: usi
         HScore{jumps, distance}
     };
 
+    let RESERVE_SIZE: usize = 500_000;
+
 
     let mut g_score = HashMap::new();
-    g_score.reserve(neutron_systems.len() * 2);
+    g_score.reserve(RESERVE_SIZE);
     let mut h_score = HashMap::new();
-    h_score.reserve(neutron_systems.len() * 2);
+    h_score.reserve(RESERVE_SIZE);
     let mut parent: HashMap<usize, usize> = HashMap::new();
-    parent.reserve(neutron_systems.len() * 2);
+    parent.reserve(RESERVE_SIZE);
     let mut to_visit = BinaryHeap::new();
-    to_visit.reserve(neutron_systems.len() * 2);
+    to_visit.reserve(RESERVE_SIZE);
 
     let start_h_score = HScore{jumps: 0, distance: 0.0.into()};
     g_score.insert(start_idx, start_h_score);
@@ -340,7 +344,8 @@ pub fn neutron_a_star(systems: &Vec<StarSystem>, start_idx: usize, goal_idx: usi
     parent.insert(goal_idx, start_idx);
 
     to_visit.push(Reverse((no_neutron_h_score, goal_idx, 0)));
-    for (n_idx_idx, &n_idx) in neutron_systems.iter().enumerate() {
+    for (n_idx_idx, n_system) in neutron_systems.iter().enumerate() {
+        let n_idx = n_system.idx as usize;
         let h = h_fn(start_idx, n_idx_idx);
         if h < no_neutron_h_score {
             *h_score.entry(n_idx).or_insert(h) = h;
@@ -349,7 +354,6 @@ pub fn neutron_a_star(systems: &Vec<StarSystem>, start_idx: usize, goal_idx: usi
         }
     }
 
-    let mut visited: Vec<bool> = vec![false; neutron_systems.len()];
     let mut num_processed: usize = 0;
 
     while let Some(Reverse((current_h_score, current_idx, current_idx_idx))) = to_visit.pop() {
@@ -379,8 +383,8 @@ pub fn neutron_a_star(systems: &Vec<StarSystem>, start_idx: usize, goal_idx: usi
         let from_path_distance = distance(parent_s, current);
         let parent_g_score = g_score[&parent_idx];
         let cur_g_score = HScore{jumps: parent_g_score.jumps + from_path_len, distance:parent_g_score.distance + from_path_distance};
-        //println!("[N] Queue length: {}", to_visit.len());
-        //println!("[N] Processing {} {:?}\n {:?} {:?}", systems[current_idx].name, systems[current_idx].coords, cur_g_score, current_h_score);
+        println!("[N] Queue length: {}", to_visit.len());
+        println!("[N] Processing {} {:?}\n {:?} {:?}", systems[current_idx].name, systems[current_idx].coords, cur_g_score, current_h_score);
         *g_score.entry(current_idx).or_insert(cur_g_score) = cur_g_score;
         let to_goal_distance = distance(current, goal);
         let to_goal_jumps = f32::from((to_goal_distance / jump_distance).ceil()) as i64;
@@ -394,23 +398,15 @@ pub fn neutron_a_star(systems: &Vec<StarSystem>, start_idx: usize, goal_idx: usi
             *parent.get_mut(&goal_idx).unwrap() = current_idx;
         }
 
-        let d_from_sol_cutoff = if to_goal_distance < total_distance {to_goal_distance} else {total_distance};
-        
-        visited[current_idx_idx] = true;
         num_processed += 1;
         if num_processed % 100_000 == 0 {
             println!("Total processed {} ({}%)", num_processed, (num_processed as f64 * 100.0) / (neutron_systems.len() as f64));
         }
 
-        for (n_idx_idx, &neighbor_idx) in neutron_systems.iter().enumerate() {
-            if visited[n_idx_idx] {
-                continue;
-            }
-            let neighbor = &systems[neighbor_idx];
-            let d_from_sol_diff = (neighbor.distance_from_sol - current.distance_from_sol).abs();
-            if d_from_sol_diff >= d_from_sol_cutoff - neutron_distance_to_goal[n_idx_idx] {
-                continue;
-            }
+        let current_n_system = &neutron_systems[current_idx_idx];
+        for &n_idx_idx in &current_n_system.neighbors {
+            let n_idx_idx = n_idx_idx as usize;
+            let neighbor_idx = neutron_systems[n_idx_idx].idx as usize;
             let mut new_h_score = h_fn(current_idx, n_idx_idx);
             new_h_score.jumps += cur_g_score.jumps;
             new_h_score.distance += cur_g_score.distance;
@@ -450,35 +446,39 @@ pub fn neutron_a_star(systems: &Vec<StarSystem>, start_idx: usize, goal_idx: usi
 
 pub fn make_neutron_star_systems(systems: &Vec<StarSystem>, max_jump_distance: f32) -> Vec<NeutronStarSystem> {
     let max_jump_distance: Float = Float::from(max_jump_distance);
-    let neutron_stars: Vec<usize> = systems.iter().enumerate().filter_map(|(i, s)| {
+    let neutron_stars: Vec<u32> = systems.iter().enumerate().filter_map(|(i, s)| {
         if s.is_neutron {
-            Some(i)
+            Some(i as u32)
         } else {
             None
         }
     }).collect();
     let total_to_process = neutron_stars.len();
-    let mut sorted: Vec<(usize, usize)> = neutron_stars.iter().copied().enumerate().collect();
-    let mut retval = Vec::new();
-    for (start_n_idx, &start_idx) in neutron_stars.iter().enumerate() {
-        let start = &systems[start_idx];
+    let mut retval = Arc::new(Mutex::new(Vec::new()));
+    retval.lock().unwrap().resize(neutron_stars.len(), NeutronStarSystem{idx: 0, neighbors: Box::new([])});
+    let MAX_DISTANCE = Float::from(5000.0);
+    //let MAX_DISTANCE_WARN = Float::from(10000.0);
+    let n_copied: Vec<(u32, u32)> = neutron_stars.iter().copied().enumerate().map(|(t1, t2)| (t1 as u32, t2)).collect();
+    let num_processed = Arc::new(Mutex::new(0));
+    n_copied.into_par_iter().for_each(|(start_n_idx, start_idx)| {
+        let start = &systems[start_idx as usize];
+        let mut sorted: Vec<(u32, u32)> = neutron_stars.iter().copied().enumerate().map(|(t1, t2)| (t1 as u32, t2)).filter(|&(_, i)| distance(start, &systems[i as usize]) < MAX_DISTANCE).collect();
         sorted.sort_by(|&(_,i), &(_,j)| {
-            distance(start, &systems[i]).partial_cmp(&distance(start, &systems[j])).unwrap()
+            distance(start, &systems[i as usize]).partial_cmp(&distance(start, &systems[j as usize])).unwrap()
         });
-        let mut neighbors = Vec::new();
-        let mut max_distance = max_jump_distance;
+        let mut neighbors: Vec<u32> = Vec::new();
         for &(n_idx_idx, n_idx) in &sorted {
             if n_idx == start_idx {
                 continue;
             }
-            let neigh = &systems[n_idx];
+            let neigh = &systems[n_idx as usize];
             let d = distance(start, neigh);
             if d <= max_jump_distance {
                 neighbors.push(n_idx_idx);
             } else {
                 let mut should_add = true;
                 for &existing_idx_idx in &neighbors {
-                    let existing = &systems[neutron_stars[existing_idx_idx]];
+                    let existing = &systems[neutron_stars[existing_idx_idx as usize] as usize];
                     if d > distance(neigh, existing) {
                         should_add = false;
                         break;
@@ -486,18 +486,24 @@ pub fn make_neutron_star_systems(systems: &Vec<StarSystem>, max_jump_distance: f
                 }
                 if should_add {
                     neighbors.push(n_idx_idx);
-                    if d > max_distance {
-                        max_distance = d;
-                    }
                 }
             }
         }
-        let n_len = neighbors.len();
-        retval.push(NeutronStarSystem{
-            idx: start_idx,
-            neighbors
-        });
-        println!("Processed ({:?}) ({}) {} {}%", max_distance, n_len, retval.len(), (retval.len() as f64 * 100.0) / total_to_process as f64);
-    }
-    retval
+        let neighbors: Box<[u32]> = neighbors.into_boxed_slice();
+        {
+            let retval = &mut retval.lock().unwrap();
+            retval[start_n_idx as usize] = NeutronStarSystem{
+                idx: start_idx,
+                neighbors
+            };
+        }
+        {
+            let mut num_processed = num_processed.lock().unwrap();
+            *num_processed += 1;
+            if *num_processed % 1_000 == 0 {
+                println!("Processed {} {}%", num_processed, (*num_processed as f64 * 100.0) / total_to_process as f64);
+            }
+        }
+    });
+    Arc::into_inner(retval).unwrap().into_inner().unwrap()
 }
