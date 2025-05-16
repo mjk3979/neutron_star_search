@@ -1,3 +1,4 @@
+#![feature(lazy_get)]
 use std::cmp::Ordering;
 use std::fs::File;
 use std::io::BufReader;
@@ -12,7 +13,7 @@ use memmap2::{Mmap};
 pub type Float = FF32;
 pub type V3 = (Float, Float, Float);
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct StarSystem {
     pub name: String,
     pub main_star_type: String,
@@ -141,15 +142,15 @@ pub fn read_neutron_stars_bincode(filename: &str) -> Box<[NeutronStarSystem]> {
     records.into_iter().collect()
 }
 
-fn neighbors(systems: &IndexedFileMap<StarSystemRecord>, system_idx: u32, mut jump_distance: Float) -> Vec<u32> {
-    let system: StarSystem = systems.get(system_idx).into();
+fn neighbors(systems: &VecMap<StarSystem>, system_idx: u32, mut jump_distance: Float) -> Vec<u32> {
+    let system = systems.get(system_idx);
     if system.is_neutron {
         jump_distance *= Float::from(4.0);
     }
     let mut retval = Vec::new();
     retval.reserve(256);
     for neighbor_idx in (system_idx+1)..systems.len() {
-        let neighbor: StarSystem = systems.get(neighbor_idx).into();
+        let neighbor = systems.get(neighbor_idx);
         if neighbor.distance_from_sol > system.distance_from_sol + jump_distance {
             break;
         }
@@ -159,7 +160,7 @@ fn neighbors(systems: &IndexedFileMap<StarSystemRecord>, system_idx: u32, mut ju
     }
     if system_idx > 0 {
         for neighbor_idx in (0..(system_idx-1)).rev() {
-            let neighbor: StarSystem = systems.get(neighbor_idx).into();
+            let neighbor = systems.get(neighbor_idx);
             if neighbor.distance_from_sol < system.distance_from_sol - jump_distance {
                 break;
             }
@@ -198,11 +199,11 @@ impl PartialEq for HScore {
 impl Eq for HScore {}
 
 
-pub fn a_star(systems: &IndexedFileMap<StarSystemRecord>, start_idx: u32, goal_idx: u32, jump_distance: Float) -> Option<Vec<u32>> {
-    let start: StarSystem = systems.get(start_idx).into();
-    let goal: StarSystem = systems.get(goal_idx).into();
+pub fn a_star(systems: &VecMap<StarSystem>, start_idx: u32, goal_idx: u32, jump_distance: Float) -> Option<Vec<u32>> {
+    let start = systems.get(start_idx);
+    let goal = systems.get(goal_idx);
     let h_fn = |system_idx: u32| -> HScore {
-        let system: StarSystem = systems.get(system_idx).into();
+        let system = systems.get(system_idx);
         if system_idx == goal_idx {
             let jumps = 0;
             let distance: Float = 0.0.into();
@@ -244,12 +245,12 @@ pub fn a_star(systems: &IndexedFileMap<StarSystemRecord>, start_idx: u32, goal_i
             max_g = cur_g.jumps;
             //println!("Looking at range {}", max_g);
         }
-        let current: StarSystem = systems.get(current_idx).into();
-        println!("[A] Processing {} {:?}\n {:?} {:?}", current.name, current.coords, cur_g, current_h_score);
+        let current = systems.get(current_idx);
+        //println!("[A] Processing {} {:?}\n {:?} {:?}", current.name, current.coords, cur_g, current_h_score);
         for neighbor_idx in neighbors(systems, current_idx, jump_distance) {
             let new_g = HScore{
                 jumps: cur_g.jumps+1,
-                distance: cur_g.distance + distance(&systems.get(current_idx).into(), &systems.get(neighbor_idx).into()),
+                distance: cur_g.distance + distance(&systems.get(current_idx), &systems.get(neighbor_idx)),
             };
             let mut new_h = h_fn(neighbor_idx);
             new_h.jumps += new_g.jumps;
@@ -282,9 +283,9 @@ pub fn a_star(systems: &IndexedFileMap<StarSystemRecord>, start_idx: u32, goal_i
     None
 }
 
-pub fn neutron_a_star(systems: &IndexedFileMap<StarSystemRecord>, neutron_systems: &IndexedFileMap<NeutronStarSystem>, start_idx: u32, goal_idx: u32, jump_distance: Float) -> Option<Vec<u32>> {
-    let start: StarSystem = systems.get(start_idx).into();
-    let goal: StarSystem = systems.get(goal_idx).into();
+pub async fn neutron_a_star(systems: &VecMap<StarSystem>, neutron_systems: &Arc<IndexedFileMap<NeutronStarSystem>>, start_idx: u32, goal_idx: u32, jump_distance: Float) -> Option<Vec<u32>> {
+    let start = systems.get(start_idx);
+    let goal = systems.get(goal_idx);
 
     let total_distance = distance(&start, &goal);
 
@@ -296,10 +297,9 @@ pub fn neutron_a_star(systems: &IndexedFileMap<StarSystemRecord>, neutron_system
         // })
     // }).collect();
 
-    let h_fn = |from_idx: u32, system_n_idx: u32| -> HScore {
-        let system_idx = neutron_systems.get(system_n_idx).idx;
-        let system: StarSystem = systems.get(system_idx).into();
-        let from: StarSystem = systems.get(from_idx).into();
+    let h_fn = |from_idx: u32, system_idx: u32| -> HScore {
+        let system = systems.get(system_idx);
+        let from = systems.get(from_idx);
         let from_distance = distance(&from, &system);
         let from_jumps = if from.is_neutron {
             let after_first_jump_distance: Float = from_distance - jump_distance * Float::from(4.0);
@@ -342,11 +342,29 @@ pub fn neutron_a_star(systems: &IndexedFileMap<StarSystemRecord>, neutron_system
     parent.insert(goal_idx, start_idx);
 
     to_visit.push(Reverse((no_neutron_h_score, goal_idx, 0)));
-    for n_idx_idx in 0..neutron_systems.len() {
-        let n_system = neutron_systems.get(n_idx_idx);
-        let n_idx = n_system.idx;
-        let h = h_fn(start_idx, n_idx_idx);
+    let mut n_idx_idx: u32 = 0;
+    let mut idx_lookup = vec![032; neutron_systems.len() as usize];
+    let p_results: Vec<(u32, u32, HScore)> = (0..systems.len()).filter(|i| systems.get(*i).is_neutron).enumerate().par_bridge().map(|(n_idx_idx, n_idx)| {
+        let system = systems.get(n_idx);
+        let h = h_fn(start_idx, n_idx);
+        (n_idx_idx as u32, n_idx, h)
+    }).collect();
+
+    let mut precache: Vec<_> = std::iter::repeat(neutron_systems).take(neutron_systems.len() as usize).enumerate().map(|(i, neutron_systems)| {
+        let i = i as u32;
+        std::cell::LazyCell::new(move || {
+            let neutron_systems: Arc<_> = neutron_systems.clone();
+            tokio::task::spawn(async move {
+                neutron_systems.get(i)
+            })
+        })
+    }).collect();
+        
+
+    for (n_idx_idx, n_idx, h) in p_results {
+        idx_lookup[n_idx_idx as usize] = n_idx;
         if h < no_neutron_h_score {
+            std::cell::LazyCell::force(&precache[n_idx_idx as usize]);
             *h_score.entry(n_idx).or_insert(h) = h;
             to_visit.push(Reverse((h, n_idx, n_idx_idx)));
             *parent.entry(n_idx).or_insert(start_idx) = start_idx;
@@ -354,6 +372,7 @@ pub fn neutron_a_star(systems: &IndexedFileMap<StarSystemRecord>, neutron_system
     }
 
     let mut num_processed: usize = 0;
+
 
     while let Some(Reverse((current_h_score, current_idx, current_idx_idx))) = to_visit.pop() {
         if current_idx == goal_idx {
@@ -363,10 +382,11 @@ pub fn neutron_a_star(systems: &IndexedFileMap<StarSystemRecord>, neutron_system
             continue;
         }
 
+        let current_n_system = std::cell::LazyCell::force_mut(&mut precache[current_idx_idx as usize]);
 
         let parent_idx = parent[&current_idx];
-        let parent_s: StarSystem = systems.get(parent_idx).into();
-        let current: StarSystem = systems.get(current_idx).into();
+        let parent_s = systems.get(parent_idx);
+        let current = systems.get(current_idx);
         let from_path_len = if parent_s.is_neutron && distance(&parent_s, &current) <= jump_distance * 4.0 {
             1
         } else if distance(&parent_s, &current) <= jump_distance {
@@ -382,8 +402,8 @@ pub fn neutron_a_star(systems: &IndexedFileMap<StarSystemRecord>, neutron_system
         let from_path_distance = distance(&parent_s, &current);
         let parent_g_score = g_score[&parent_idx];
         let cur_g_score = HScore{jumps: parent_g_score.jumps + from_path_len, distance:parent_g_score.distance + from_path_distance};
-        println!("[N] Queue length: {}", to_visit.len());
-        println!("[N] Processing {} {:?}\n {:?} {:?}", current.name, current.coords, cur_g_score, current_h_score);
+        //println!("[N] Queue length: {}", to_visit.len());
+        //println!("[N] Processing {} {:?}\n {:?} {:?}", current.name, current.coords, cur_g_score, current_h_score);
         *g_score.entry(current_idx).or_insert(cur_g_score) = cur_g_score;
         let to_goal_distance = distance(&current, &goal);
         let to_goal_jumps = f32::from((to_goal_distance / jump_distance).ceil()) as i64;
@@ -402,10 +422,11 @@ pub fn neutron_a_star(systems: &IndexedFileMap<StarSystemRecord>, neutron_system
             println!("Total processed {} ({}%)", num_processed, (num_processed as f64 * 100.0) / (neutron_systems.len() as f64));
         }
 
-        let current_n_system = neutron_systems.get(current_idx_idx);
+        let current_n_system = current_n_system.await.unwrap();
         for &n_idx_idx in &current_n_system.neighbors {
-            let neighbor_idx = neutron_systems.get(n_idx_idx).idx;
-            let mut new_h_score = h_fn(current_idx, n_idx_idx);
+            std::cell::LazyCell::force(&precache[n_idx_idx as usize]);
+            let neighbor_idx = idx_lookup[n_idx_idx as usize];
+            let mut new_h_score = h_fn(current_idx, neighbor_idx);
             new_h_score.jumps += cur_g_score.jumps;
             new_h_score.distance += cur_g_score.distance;
             if new_h_score >= no_neutron_h_score {
@@ -537,12 +558,43 @@ pub struct IndexedFileMap<T: bincode::Decode<()>> {
     phantom: std::marker::PhantomData<T>,
 }
 
+pub struct CachedIndexedFileMap<T: bincode::Decode<()>, U: From<T> + Clone> {
+    map: IndexedFileMap<T>,
+    cache: Vec<std::sync::OnceLock<U>>,
+}
+
+impl<T: bincode::Decode<()>, U: From<T> + Clone> CachedIndexedFileMap<T, U> {
+    pub fn new(filepath: &str) -> Self {
+        let map = IndexedFileMap::new(filepath);
+        let mut cache = Vec::new();
+        cache.resize(map.len() as usize, std::sync::OnceLock::new());
+        Self {
+            map,
+            cache,
+        }
+    }
+
+    pub fn get(&self, idx: u32) -> &U {
+        self.cache[idx as usize].get_or_init(|| {
+            self.get_no_cache(idx)
+        })
+    }
+
+    pub fn get_no_cache(&self, idx: u32) -> U {
+        return self.map.get(idx).into();
+    }
+
+    pub fn len(&self) -> u32 {
+        return self.map.len();
+    }
+}
+
 impl<T: bincode::Decode<()>> IndexedFileMap<T> {
     pub fn new(filepath: &str) -> Self {
         let bincode_config = bincode::config::standard().with_fixed_int_encoding();
         let file = File::open(filepath).unwrap();
         let map = unsafe { Mmap::map(&file).unwrap() };
-        map.advise(memmap2::Advice::Sequential).unwrap();
+        map.advise(memmap2::Advice::Random).unwrap();
         let (offset_table_size, _): (usize, _) = bincode::decode_from_slice(&map[..8], bincode_config).unwrap();
         let (offset_table, _) = bincode::decode_from_slice(&map[8..offset_table_size+8], bincode_config).unwrap();
         let phantom = std::marker::PhantomData;
@@ -563,7 +615,38 @@ impl<T: bincode::Decode<()>> IndexedFileMap<T> {
         retval
     }
 
+    pub fn advise_need(&self, indexes: &[u32]) {
+        for &i in indexes {
+            let (offset, size) = self.offset_table[i as usize];
+            self.map.advise_range(
+                memmap2::Advice::WillNeed,
+                offset,
+                size as usize
+            ).unwrap();
+        }
+    }
+
     pub fn len(&self) -> u32 {
         self.offset_table.len() as u32
+    }
+}
+
+pub struct VecMap<T> {
+    v: Box<[T]>
+}
+
+impl<T> VecMap<T> {
+    pub fn new(v: Vec<T>) -> Self {
+        Self {
+            v: v.into_boxed_slice()
+        }
+    }
+
+    pub fn get(&self, idx: u32) -> &T {
+        &self.v[idx as usize]
+    }
+
+    pub fn len(&self) -> u32 {
+        self.v.len() as u32
     }
 }
