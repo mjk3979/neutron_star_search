@@ -11,8 +11,17 @@ async fn main() {
     let neutron_systems = Arc::new(IndexedFileMap::new(&args[2]));
     println!("Read {} systems", systems.len());
 
-    let start_name = "Sol";
-    let goal_name = "Colonia";
+    //let start_name = "Sol";
+    //let goal_name = "Colonia";
+
+    // This one is a bug !!!!
+    //let start_name = "Blo Eur SC-Y c28-2";
+    //let goal_name = "NGC 6188 Sector LC-V c2-28";
+    // !!!!!
+    //let start_name = "NGC 6188 Sector LC-V c2-28";
+    let start_name = "Blu Thua MR-N d6-32";
+    let goal_name = "Ehlanda";
+
     //let start_name = "Catun";
     //let goal_name = "Traikee IY-U c2-4";
     //let start_name = "NGC 2546 Sector AO-V b33-0";

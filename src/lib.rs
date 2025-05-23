@@ -199,9 +199,10 @@ impl PartialEq for HScore {
 impl Eq for HScore {}
 
 
-pub fn a_star(systems: &VecMap<StarSystem>, start_idx: u32, goal_idx: u32, jump_distance: Float) -> Option<Vec<u32>> {
+pub fn a_star(systems: &VecMap<StarSystem>, start_idx: u32, goal_idx: u32, jump_distance: Float, max_jumps: Option<i64>) -> Option<Vec<u32>> {
     let start = systems.get(start_idx);
     let goal = systems.get(goal_idx);
+    println!("Searching {} to {} distance {}", start.name, goal.name, distance(start, goal));
     let h_fn = |system_idx: u32| -> HScore {
         let system = systems.get(system_idx);
         if system_idx == goal_idx {
@@ -256,6 +257,11 @@ pub fn a_star(systems: &VecMap<StarSystem>, start_idx: u32, goal_idx: u32, jump_
             new_h.jumps += new_g.jumps;
             new_h.distance += new_g.distance;
             if !h_score.contains_key(&neighbor_idx) || new_h < h_score[&neighbor_idx] {
+                if let Some(max_jumps) = max_jumps {
+                    if new_h.jumps > max_jumps {
+                        continue;
+                    }
+                }
                 *h_score.entry(neighbor_idx).or_insert(new_h) = new_h;
                 *g_score.entry(neighbor_idx).or_insert(new_g) = new_g;
                 *parent.entry(neighbor_idx).or_insert(0) = current_idx;
@@ -334,7 +340,13 @@ pub async fn neutron_a_star(systems: &VecMap<StarSystem>, neutron_systems: &Arc<
     g_score.insert(start_idx, start_h_score);
     h_score.insert(start_idx, start_h_score);
     
-    let no_neutron_path = a_star(systems, start_idx, goal_idx, jump_distance)?;
+    let no_neutron_path = a_star(systems, start_idx, goal_idx, jump_distance, None)?;
+    {
+        for &idx in &no_neutron_path {
+            let system = systems.get(idx);
+            println!("{}", system.name);
+        }
+    }
     let no_neutron_len = no_neutron_path.len() as i64;
     println!("No neutron length: {}", no_neutron_len);
     let no_neutron_h_score = HScore{jumps: no_neutron_len, distance: 0.0.into()};
@@ -387,12 +399,13 @@ pub async fn neutron_a_star(systems: &VecMap<StarSystem>, neutron_systems: &Arc<
         let parent_idx = parent[&current_idx];
         let parent_s = systems.get(parent_idx);
         let current = systems.get(current_idx);
+        let parent_g_score = g_score[&parent_idx];
         let from_path_len = if parent_s.is_neutron && distance(&parent_s, &current) <= jump_distance * 4.0 {
             1
         } else if distance(&parent_s, &current) <= jump_distance {
             1
         } else {
-            let from_path = a_star(systems, parent_idx, current_idx, jump_distance);
+            let from_path = a_star(systems, parent_idx, current_idx, jump_distance, Some(no_neutron_len - parent_g_score.jumps));
             if from_path.is_none() {
                 continue;
             }
@@ -400,13 +413,21 @@ pub async fn neutron_a_star(systems: &VecMap<StarSystem>, neutron_systems: &Arc<
             from_path.len() as i64
         };
         let from_path_distance = distance(&parent_s, &current);
-        let parent_g_score = g_score[&parent_idx];
         let cur_g_score = HScore{jumps: parent_g_score.jumps + from_path_len, distance:parent_g_score.distance + from_path_distance};
-        //println!("[N] Queue length: {}", to_visit.len());
-        //println!("[N] Processing {} {:?}\n {:?} {:?}", current.name, current.coords, cur_g_score, current_h_score);
+        println!("[N] Queue length: {}", to_visit.len());
+        println!("[N] Processing {} {:?}\n {:?} {:?}", current.name, current.coords, cur_g_score, current_h_score);
         *g_score.entry(current_idx).or_insert(cur_g_score) = cur_g_score;
+
+        // TODO this needs to account for the first just being from a neutron star
         let to_goal_distance = distance(&current, &goal);
-        let to_goal_jumps = f32::from((to_goal_distance / jump_distance).ceil()) as i64;
+        let to_goal_jumps = {
+            let after_first_jump_to_goal_distance = to_goal_distance - (jump_distance * 4.0);
+            if after_first_jump_to_goal_distance <= 0.0.into() {
+                1
+            } else {
+                1 + f32::from((after_first_jump_to_goal_distance / jump_distance).ceil()) as i64
+            }
+        };
         let to_goal_h_score = HScore {
             distance: cur_g_score.distance + to_goal_distance,
             jumps: cur_g_score.jumps + to_goal_jumps,
@@ -446,7 +467,7 @@ pub async fn neutron_a_star(systems: &VecMap<StarSystem>, neutron_systems: &Arc<
     let mut good = false;
     while let Some(&parent_idx) = parent.get(&path_idx) {
         // println!("Finding subpath {} {}", parent_idx, path_idx);
-        let subpath = a_star(systems, parent_idx, path_idx, jump_distance)?;
+        let subpath = a_star(systems, parent_idx, path_idx, jump_distance, None)?;
         path.extend(subpath.into_iter().rev());
         if parent_idx == start_idx {
             good = true;
